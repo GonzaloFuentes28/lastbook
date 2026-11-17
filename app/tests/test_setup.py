@@ -197,7 +197,7 @@ class Base(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def manifest(self, zip_sha=None, model_sha=None):
+    def manifest(self, zip_sha=None, model_sha=None, more_packs=()):
         m = {'version': 1, 'published': '2026-11-12',
              'packs': [{'id': 'small', 'title': 'Small', 'summary': 's', 'records': 3, 'installed_bytes': self.installed, 'available': True,
                         'files': [{'name': 'Lastbook-Small.zip', 'url': f'{self.base}/Lastbook-Small.zip', 'size': len(self.zip),
@@ -205,6 +205,7 @@ class Base(unittest.TestCase):
                        {'id': 'all', 'title': 'All', 'available': False, 'files': []}],
              'models': [{'id': 'gemma', 'title': 'Gemma', 'file': 'model.gguf', 'url': f'{self.base}/model.gguf', 'size': len(self.model),
                          'sha256': model_sha or sha(self.model), 'memory_bytes': 19_027_384_256, 'available': True}]}
+        m['packs'][1:1] = more_packs
         v = manifest.validate(m, ALLOWED)
         self.assertIsNotNone(v)
         return manifest.Manifest(bundled=v, remote=None, allowed=ALLOWED, context=self.ctx)
@@ -519,6 +520,53 @@ class Jobs(Base):
         self.assertEqual(self.marked, [(str(lib / 'models' / 'model.gguf'), sha(self.model))])   # the digest setup matched, carried through the switch
         self.assertFalse(work.exists())
         self.assertEqual(json.loads((lib / 'setup-pack.json').read_text())['pack'], 'small')
+
+    def test_choosing_another_pack_after_a_failure_installs_only_its_files(self):
+        """#73: the first pack's unpacked files must not end up in the library made from the second."""
+        shared = 'library-data/shared.bin'
+        first = self.tmp / 'Lastbook-Small.zip'
+        self.installed = make_pack(first, {'library-data/catalog.json': b'{"records": []}', 'pack.json': b'{"name": "small"}',
+                                           shared: b'a' * MiB, 'library-data/only-small.bin': b'small'})
+        second = self.tmp / 'Lastbook-Medium.zip'
+        medium_installed = make_pack(second, {'library-data/catalog.json': b'{"records": [1]}', 'pack.json': b'{"name": "medium"}',
+                                              shared: b'b' * MiB})
+        self.zip = first.read_bytes()
+        medium_zip = second.read_bytes()
+        self.files.data['Lastbook-Small.zip'] = self.zip
+        self.files.data['Lastbook-Medium.zip'] = medium_zip
+        medium = {'id': 'medium', 'title': 'Medium', 'summary': 'm', 'records': 4, 'installed_bytes': medium_installed, 'available': True,
+                  'files': [{'name': 'Lastbook-Medium.zip', 'url': f'{self.base}/Lastbook-Medium.zip', 'size': len(medium_zip),
+                             'sha256': sha(medium_zip), 'kind': 'zip'}]}
+        m = self.manifest(more_packs=[medium])
+
+        self.files.corrupt['model.gguf'] = 5          # the pack unpacks, then the local AI fails
+        s = self.setup(manifest=m)
+        s.start('small', True)
+        j = self.wait(s)
+        self.assertEqual(j['state'], 'failed', j)
+        self.assertEqual([i['state'] for i in j['items']], ['done', 'failed'])
+
+        s.start('medium', False)                       # "Choose again", the same place
+        j = self.wait(s)
+        self.assertEqual(j['state'], 'done', j)
+        s.finish()
+        lib, _ = api.startup(self.settings)
+        self.assertEqual((lib / 'pack.json').read_bytes(), b'{"name": "medium"}')
+        self.assertEqual((lib / shared).read_bytes(), b'b' * MiB)
+        self.assertFalse((lib / 'library-data' / 'only-small.bin').exists())
+
+    def test_trying_the_same_pack_again_keeps_its_unpacked_files(self):
+        """#73: the reverse case: the same pack and revision still reuse what the failed run unpacked."""
+        self.files.corrupt['model.gguf'] = 5
+        s = self.setup()
+        s.start('small', True)
+        self.assertEqual(self.wait(s)['state'], 'failed')
+        big = self.parent / 'LastbookData.setup' / 'unpack' / 'LastbookData' / 'library-data' / 'big.bin'
+        before = big.stat().st_ino
+        self.files.corrupt.clear()
+        s.start('small', True)
+        self.assertEqual(self.wait(s)['state'], 'done')
+        self.assertEqual(big.stat().st_ino, before)    # not written again
 
     def test_corrupt_once_then_good(self):
         self.files.corrupt['Lastbook-Small.zip'] = 1

@@ -940,6 +940,7 @@ class Setup:
             with self.lock:
                 it['bytes_total'], it['bytes_done'] = pack['download_bytes'], 0
         staged = work / 'unpack'
+        _fresh_unpack(staged, {'pack': pack['id'], 'revision': pack.get('revision'), 'files': [f['sha256'] for f in pack['files']]})
         got, offset = [], 0
         for f in pack['files']:
             path, ours = self._get_file(it, f, plan, work, control, offset)
@@ -1112,6 +1113,21 @@ def _margin(total):
     """Room left free beyond what an install needs: 5% of the disk, at least 5 GB and at most 20 GB (5% of an 8 TB disk would
     rule out every library)."""
     return max(RECOMMEND_MARGIN, min(int((total or 0) * 0.05), RECOMMEND_MARGIN_MAX))
+
+
+def _fresh_unpack(staged, stamp):
+    """The unpack folder keeps whole files from an earlier run, so a resumed job does not unpack them again. That is only right
+    for the same pack: files left by another pack (or another revision) would be taken as whole when their size matches. So the
+    folder carries a note of what it was unpacked from, and is emptied when that is not what comes next."""
+    note = Path(staged) / 'unpacked-from.json'
+    try:
+        same = json.loads(note.read_text(encoding='utf-8')) == stamp
+    except (OSError, ValueError):
+        same = False
+    if not same:
+        shutil.rmtree(staged, ignore_errors=True)
+    Path(staged).mkdir(parents=True, exist_ok=True)
+    install._write_json(note, stamp)
 
 
 def _tree_size(p):
