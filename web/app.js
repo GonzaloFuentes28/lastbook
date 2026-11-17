@@ -32,6 +32,7 @@ const I = {
   page: '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h7M9 17h7"/>',
   up: '<path d="M12 19V5M6 11l6-6 6 6"/>', back: '<path d="M15 18 9 12l6-6"/>', right: '<path d="m9 18 6-6-6-6"/>', down: '<path d="m6 9 6 6 6-6"/>',
   warn: '<path d="M12 3 2 20h20zM12 10v4M12 17h.01"/>', save: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  print: '<path d="M7 8V3h10v5"/><rect x="3" y="8" width="18" height="9" rx="2"/><path d="M7 14h10v7H7z"/>',
   ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"/>', prep: '<path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/>',
   shelf: '<path d="M4 4v16M9 4v16M14 5l4 15M3 20h18"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
   play: '<path d="M7 4v16l13-8z"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -489,7 +490,7 @@ async function topicPage(id, open) {
   const related = (t.related || []).map(topicById).filter(Boolean);
   main.innerHTML = `<div class="ghero" ${tcStyle(id)}><div class="ghero-in">${crumbs([['Videos', '#/videos'], [learn ? 'Learn a skill' : 'Need help now', learn ? '#/library' : '#/'], [SHORT[id] || t.title]])}
       <div class="row1"><span class="ico">${ico(t.id)}</span><h1>${esc(t.title)}</h1></div><p class="lead">${esc(t.intro || '')}</p>
-      <div class="vactions" style="margin-bottom:0">${askLink('topic:' + id, 'Ask a question about this')}</div></div></div>
+      <div class="vactions" style="margin-bottom:0">${askLink('topic:' + id, 'Ask a question about this')}<button class="btn plain" id="printCopy" title="A PDF of this guide’s warnings and the pages it points to, to print or keep">${ico('print')}<span>Printable copy</span></button></div></div></div>
     <div class="gcols" ${tcStyle(id)}><div>
       ${(t.choices || []).length ? `<p class="ask" id="askh">${learn ? 'Where do you want to start?' : 'What’s happening?'}</p><div class="situations" aria-labelledby="askh">${sits}</div>` : ''}
       <div class="gnarrow">${limits}${disagree}</div>
@@ -516,6 +517,29 @@ async function topicPage(id, open) {
     cb.closest('.step').classList.toggle('done', !!p[cb.dataset.prog].practised);
   }));
   if (open) { const c = $('#c-' + CSS.escape(open)); if (c) setTimeout(() => c.scrollIntoView({ block: 'start' }), 0) }
+  printCopy(id, t.title);
+}
+// The printable copy (engine/print_kit.py) is made first, then saved by a second click: the desktop app saves only its own blob:
+// downloads that a click starts (as the chat's export), and a click spent waiting for the PDF would no longer count as one.
+function printCopy(id, title) {
+  const b = $('#printCopy', main);
+  if (!b) return;
+  let url = null;
+  leaving = () => { if (url) URL.revokeObjectURL(url) };
+  b.addEventListener('click', async () => {
+    b.disabled = true; $('span', b).textContent = 'Making the printable copy…';
+    try {
+      const r = await fetch('/api/print/' + encodeURIComponent(id) + '.pdf');
+      if (!r.ok) throw new Error();
+      const blob = await r.blob();
+      if (!b.isConnected) return;
+      url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.className = 'btn'; a.href = url; a.download = `Lastbook - ${title.replace(/[\\/:*?"<>|]+/g, ' ')}.pdf`;
+      a.innerHTML = `${ico('save')}<span>Save PDF (${Math.max(1, Math.round(blob.size / 1e6))} MB)</span>`;
+      b.replaceWith(a);
+    } catch { b.disabled = false; $('span', b).textContent = 'Could not make the copy. Try again' }
+  });
 }
 
 /* ------------------------------------------------------------- videos -- */

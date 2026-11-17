@@ -12,6 +12,7 @@ requests, and adds a few read-only endpoints:
   /api/find?q=&kind=          plain-language search (synonyms, grouping by document, trusted-source ranking)
   /api/doc/<id>               one catalog record (+ linked video/transcript)
   /api/page/<id>/<n>          text of one page;  /api/page/<id>/<n>.png  rendered page image (cached)
+  /api/print/<topic>.pdf      a guide's printable copy: its warnings, then the PDF pages it cites (engine/print_kit.py)
   /api/transcript/<video id>  timed transcript cues
   /api/shelves, /api/shelf/<id>   browse the whole collection by plain-language shelf
   /api/map/tile/<z>/<x>/<y>   offline street map vector tile (SoCal OpenStreetMap)
@@ -1992,6 +1993,20 @@ class Handler(library.Handler):
                 return self.send_static(WEB / 'sw.js')
             if path == '/api/topics':
                 return self.send_json(topics_resolved())
+            m = re.fullmatch(r'/api/print/([\w-]+)\.pdf', path)
+            if m:   # a guide's printable copy: its warnings and contents, then the real pages it cites (engine/print_kit.py)
+                t = next((t for t in topics_resolved() if t.get('id') == m.group(1) and not t.get('error')), None)
+                if not t:
+                    return self.send_json({'error': 'There is no guide by that name.'}, 404)
+                from engine import print_kit
+                with _pdf_lock:
+                    data = print_kit.build(t, LIB)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pdf')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == '/api/find':
                 return self.send_json(find(qs.get('q', '')[:200], qs.get('kind', 'all')))
             if path.startswith('/api/doc/'):
