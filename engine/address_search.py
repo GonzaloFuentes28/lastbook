@@ -53,6 +53,151 @@ def normalize_de(text):
     return ' '.join(word[:-len('strasse')] + 'str' if word.endswith('strasse') else word for word in words)
 
 
+
+# ---- Spain, scheme 'es-1' --------------------------------------------------------------------------------------------
+ES_NORM = 'es-1'
+# Street types and their common abbreviations, in Spanish and the co-official languages, each to one canonical word.
+ES_TYPES = {}
+for _canon, _forms in {
+        'calle': 'calle c cl cll call carrer carrer kalea rua ru', 'avenida': 'avenida av avda avd avinguda avgda etorbidea',
+        'plaza': 'plaza pl pza plz placa praza enparantza', 'paseo': 'paseo ps po pso passeig pasealekua',
+        'camino': 'camino cm cno cami bidea', 'carretera': 'carretera ctra crta cr', 'ronda': 'ronda rda', 'travesia': 'travesia trav tr',
+        'glorieta': 'glorieta gta', 'pasaje': 'pasaje pje psje passatge', 'urbanizacion': 'urbanizacion urb', 'callejon': 'callejon cjon',
+        'lugar': 'lugar lg', 'diseminados': 'diseminados diseminado', 'barrio': 'barrio bo barri', 'partida': 'partida pda',
+        'aldea': 'aldea', 'caserio': 'caserio', 'poblado': 'poblado', 'barriada': 'barriada', 'calleja': 'calleja', 'cuesta': 'cuesta',
+        'sector': 'sector', 'poligono': 'poligono pol', 'colonia': 'colonia col', 'paraje': 'paraje', 'canada': 'canada', 'vereda': 'vereda',
+        'rotonda': 'rotonda', 'jardin': 'jardin', 'puerto': 'puerto', 'bajada': 'bajada', 'subida': 'subida', 'costanilla': 'costanilla',
+        'rambla': 'rambla rbla', 'via': 'via', 'grupo': 'grupo', 'arrabal': 'arrabal', 'terrenos': 'terrenos', 'extrarradio': 'extrarradio'}.items():
+    for _form in _forms.split():
+        ES_TYPES[_form] = _canon
+ES_PARTICLES = frozenset('de del la las el los l d dels da das do dos y i'.split())
+ES_FLOOR = frozenset('izq izqda izda izquierda dcha dch dcho dra derecha ctro centro bajo bj atico entlo entresuelo principal pral '
+                     'piso puerta pta esc escalera portal planta'.split())   # not 'pl': that is also plaza
+
+
+def fold_es(text):
+    """Lower case without accents: 'Alcalá' -> 'alcala', 'Peña' -> 'pena', 'Plaça' -> 'placa', 'Sant Pau' stays, 'l·l' -> 'll'."""
+    text = unicodedata.normalize('NFKD', text.lower().replace('·', ''))
+    return ''.join(c for c in text if not unicodedata.combining(c))
+
+
+def place_es(name):
+    """A town as the index and the search both write it: 'Rivas-Vaciamadrid' -> 'rivas vaciamadrid', 'Leganés' -> 'leganes'."""
+    return ' '.join(re.findall(r'[a-z0-9]+', fold_es(name)))
+
+
+def street_es(street):
+    """(type, core) of a street name: 'Calle de las Cuevas' and Overture's 'CALLE CUEVAS LAS' both -> ('calle', 'cuevas').
+    The core has no street type and no articles or 'de', so the cadastre's order and a person's give the same words."""
+    words = re.sub(r'[^a-z0-9 ]+', ' ', fold_es(street)).split()
+    kind = ES_TYPES.get(words[0], '') if words else ''
+    if kind and len(words) > 1:
+        words = words[1:]
+    return kind, ' '.join(w for w in words if w not in ES_PARTICLES)
+
+
+def normalize_es(text):
+    """Scheme 'es-1': the core of a street name, as street_es. Spanish indexes store this in their norm column."""
+    return street_es(text)[1]
+
+
+def _parts_es(query):
+    """(number, suffix, type, core, postcode, place) in Spanish order, or None.
+    'Calle de Alcalá, 45, 3º izq., 28014 Madrid' -> ('45', '', 'calle', 'alcala', '28014', 'madrid'). The floor and door after the
+    number are dropped. 's/n' is the number 'SN', as the data writes S-N. A single letter after the number is its suffix ('12 B')."""
+    text = fold_es(query)
+    text = re.sub(r'\bs\s*/\s*n\b|\bs\s*-\s*n\b|\bsin numero\b', ' sn ', text)
+    text = re.sub(r'\b(\d+)\s*[ºª°]', r'\1o', text)
+    tokens = re.findall(r'[a-z0-9]+|,', text)
+    floor = lambda t: bool(re.fullmatch(r'\d+[oa]', t)) or t in ES_FLOOR
+    tokens = [t for i, t in enumerate(tokens)          # a floor or door, a bare number just before one ('3 izq'), and 'nº' go
+              if not (floor(t) or (t.isdigit() and i + 1 < len(tokens) and floor(tokens[i + 1]))
+                      or (t in ('n', 'no', 'num', 'numero') and i + 1 < len(tokens) and tokens[i + 1].isdigit()))]
+    postcode, place = '', []
+    for i in range(len(tokens) - 1, 0, -1):
+        if re.fullmatch(r'\d{5}', tokens[i]):
+            postcode, place, tokens = tokens[i], [t for t in tokens[i + 1:] if t != ','], tokens[:i]
+            break
+    number = None
+    for i, t in enumerate(tokens):         # 'Calle de Alcalá, 45', 'Carretera A-42, 30': the number right after the street's comma
+        if t == ',' and i + 1 < len(tokens) and (tokens[i + 1].isdigit() or tokens[i + 1] == 'sn') and any(re.search('[a-z]', x) for x in tokens[:i]):
+            number = i + 1
+            break
+    if number is None:                     # 'Calle Alcalá 45, 3 izq': a number between the street and a comma, not the floor after it
+        for i, t in enumerate(tokens):
+            if (t.isdigit() or t == 'sn') and i and re.search('[a-z]', tokens[i - 1]) and i + 1 < len(tokens) and tokens[i + 1] == ',':
+                number = i
+                break
+    if number is None:                     # else the last number before any place words: 'Calle 2 de Mayo 5 Madrid' -> 5
+        for i in range(len(tokens) - 1, -1, -1):
+            if tokens[i].isdigit() or tokens[i] == 'sn' or re.fullmatch(r'\d+[a-z]', tokens[i]):
+                number = i
+                break
+    if number is None:
+        return None
+    num, suffix = re.fullmatch(r'(\d+|sn)([a-z]?)', tokens[number]).groups()
+    rest = tokens[number + 1:]
+    if not suffix and rest and len(rest[0]) == 1 and rest[0] != ',' and not rest[0].isdigit():
+        suffix, rest = rest[0], rest[1:]
+    if not place:
+        place = [t for t in rest if t != ',' and not t.isdigit()]
+    words = [t for t in tokens[:number] if t != ',']
+    if not any(re.search('[a-z]', w) for w in words):
+        return None
+    kind, core = street_es(' '.join(words))
+    if not core:
+        return None
+    return num.upper(), suffix.upper(), kind, core, postcode, ' '.join(place)
+
+
+def _find_es(parts, geo_directory, limit, near):
+    number, suffix, kind, core, postcode, place = parts
+    paths = [path for path in sorted((geo_directory / 'addresses').glob('*.sqlite')) if _index_info(path)[0] == ES_NORM]
+    conditions = ['num = ?', 'norm >= ?', 'norm < ?']
+    parameters = [number, core, core + '￿']
+    if suffix:
+        conditions.append('sfx = ?')
+        parameters.append(suffix)
+    if postcode:
+        conditions.append('zip = ?')
+        parameters.append(postcode)
+    if place:                              # in SQLite, not after the LIMIT: a common street can pass any limit in one region
+        conditions.append('cnorm LIKE ?')
+        parameters.append(place + '%')
+    sql = ('SELECT num,sfx,street,city,state,zip,lat,lon,norm,typ FROM addr WHERE ' + ' AND '.join(conditions)
+           + ' ORDER BY length(norm),norm LIMIT 500')
+    rows = []
+    for path in paths:
+        source = _index_info(path)[1] or 'Overture Maps'
+        try:
+            connection = sqlite3.connect(ro_uri(path), uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            rows.extend((*row, source) for row in connection.execute(sql, parameters).fetchall())
+        except sqlite3.Error:
+            continue
+        finally:
+            connection.close()
+
+    def rank(row):
+        distance = 0
+        if near:
+            distance = (row[6] - near[0]) ** 2 + ((row[7] - near[1]) * math.cos(math.radians(near[0]))) ** 2
+        return row[8] != core, bool(kind) and row[9] != kind, row[1] != '', len(row[8]), distance, row[3]
+    results, seen = [], set()
+    for num, sfx, name, city, state, zip_code, lat, lon, normalized, typ, source in sorted(rows, key=rank):
+        key = (num, sfx, normalized, lat, lon)
+        if key in seen:
+            continue
+        seen.add(key)
+        house = 's/n' if num == 'SN' else num + (f' {sfx}' if sfx else '')
+        results.append({'name': f'{name}, {house}', 'kind': 'Street address', 'detail': ' '.join(p for p in (zip_code, city) if p),
+                        'lat': lat, 'lon': lon, 'source': source, 'onMap': True})
+        if len(results) == limit:
+            break
+    return results
+
 def is_address_query(query):
     """A standalone ZIP remains a place query. A number followed by words is an address."""
     return bool(re.match(r'^\s*\d[\w-]*\s+\S', query))
@@ -193,10 +338,14 @@ def find_addresses(query, geo_directory, limit=8, near=None):
     indexes whose meta norm is de-1. Each index is only ever searched with its own normalization."""
     if is_address_query(query):
         return _find_us(query, Path(geo_directory), limit, near)
+    found = []
     parts = _parts_de(query)
-    if parts is None:
-        return []
-    return _find_de(parts, Path(geo_directory), limit, near)
+    if parts is not None:
+        found = _find_de(parts, Path(geo_directory), limit, near)
+    parts = _parts_es(query)               # each index is searched with its own rule only: none of this touches a de-1 or US index
+    if parts is not None and len(found) < limit:
+        found += _find_es(parts, Path(geo_directory), limit - len(found), near)
+    return found
 
 
 def _find_de(parts, geo_directory, limit, near):

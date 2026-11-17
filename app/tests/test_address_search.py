@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from engine.address_search import (find_addresses, is_address_query, is_german_address_query, is_german_postcode_query,
-                                   normalize, normalize_de)
+                                   normalize, normalize_de, street_es)
 
 
 class AddressSearchTests(unittest.TestCase):
@@ -262,6 +262,102 @@ class GermanAddressSearchTests(unittest.TestCase):
             hit, = server.places('Unter den Linden 77')
             self.assertEqual((hit['name'], hit['kind']), ('Unter den Linden 77', 'Street address'))
 
+
+
+def _es_builder():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('build_addresses_es', Path(__file__).resolve().parents[2] / 'tools' / 'build_addresses_es.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# (number, street, unit, postcode, town, lon, lat) as Overture writes Spanish rows: capitals, accents mostly dropped, cadastre order.
+# Invented streets in invented towns, except that the shapes are the real ones measured in docs/REGIONS-ES.md.
+SPAIN = [
+    ('134', 'CALLE CUEVAS LAS', None, '28991', 'Villaejemplo', -3.60, 40.10),
+    ('45', 'CALLE ALCALA', None, '28014', 'Madrid', -3.69, 40.42),
+    ('45', 'CALLE ALCALA', None, '28991', 'Villaejemplo', -3.61, 40.11),
+    ('3', 'CALLE PENA', None, '28992', 'Peñaejemplo', -3.62, 40.12),
+    ('640', 'AVENIDA DIAGONAL', None, '28993', 'Diagonalejo', -3.63, 40.13),
+    ('S-N', 'PLAZA MAYOR', None, '28994', 'Mayorejo', -3.64, 40.14),
+    ('12', 'CALLE OLMO', 'B', '28995', 'Olmeda', -3.65, 40.15),
+    ('12', 'CALLE OLMO', None, '28995', 'Olmeda', -3.6501, 40.1501),
+    ('30', 'CARRETERA A-42', None, '28996', 'Rivas-Ejemplo', -3.66, 40.16),
+]
+
+
+class SpanishAddressSearchTests(unittest.TestCase):
+    """Scheme es-1 (prototype): Spanish order, accent folding, the cadastre's articles, s/n, a door letter, and floors ignored."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.geo = Path(self.temp.name)
+        (self.geo / 'addresses').mkdir()
+        self.builder = _es_builder()
+        self.builder.build('ES-MD', SPAIN, self.geo / 'addresses' / 'ES-MD.sqlite')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def first(self, query):
+        result = find_addresses(query, self.geo)
+        self.assertTrue(result, query)
+        return result[0]
+
+    def test_index_contract(self):
+        db = sqlite3.connect(self.geo / 'addresses' / 'ES-MD.sqlite')
+        try:
+            meta = dict(db.execute('SELECT key,value FROM meta').fetchall())
+            self.assertEqual((meta['norm'], meta['region'], meta['count']), ('es-1', 'ES-MD', str(len(SPAIN))))
+            self.assertEqual(db.execute("SELECT num,sfx FROM addr WHERE norm='mayor'").fetchall(), [('SN', '')])
+        finally:
+            db.close()
+
+    def test_cadastre_order_and_a_persons_order_meet(self):
+        self.assertEqual(street_es('CALLE CUEVAS LAS'), ('calle', 'cuevas'))
+        self.assertEqual(street_es('Calle de las Cuevas'), ('calle', 'cuevas'))
+        self.assertEqual(street_es('Paseo de la Castellana'), ('paseo', 'castellana'))
+        self.assertEqual(self.first('Calle de las Cuevas 134')['lat'], 40.10)
+
+    def test_accents_abbreviations_and_co_official_types(self):
+        for query, lat in (('Calle Peña 3', 40.12), ('c/ pena 3', 40.12), ('Avda. Diagonal 640', 40.13),
+                           ('Avinguda Diagonal 640', 40.13), ('Diagonal 640', 40.13)):
+            with self.subTest(query=query):
+                self.assertEqual(self.first(query)['lat'], lat)
+
+    def test_floor_door_postcode_and_town(self):
+        for query in ('Calle de Alcalá, 45, 3º izq., 28014 Madrid', 'Calle Alcalá 45, 3 izq, Madrid', 'Calle Alcalá nº 45, 28014'):
+            with self.subTest(query=query):
+                result = find_addresses(query, self.geo)
+                self.assertEqual([r['detail'] for r in result], ['28014 Madrid'])
+
+    def test_town_with_a_hyphen(self):
+        self.assertEqual(self.first('Carretera A-42, 30, Rivas-Ejemplo')['lat'], 40.16)
+        self.assertEqual(self.first('Carretera A-42, 30, rivas ejemplo')['lat'], 40.16)
+
+    def test_no_number_and_door_letter(self):
+        self.assertEqual(self.first('Plaza Mayor s/n')['name'], 'Plaza Mayor, s/n')
+        self.assertEqual(self.first('Calle Olmo 12 B')['name'], 'Calle Olmo, 12 B')
+        self.assertEqual(self.first('Calle Olmo 12')['name'], 'Calle Olmo, 12')       # the plain number first, then its letters
+
+    def test_unknown_number_does_not_return_nearby_house(self):
+        self.assertEqual(find_addresses('Calle Alcalá 47, Madrid', self.geo), [])
+
+    def test_town_filter_is_applied_before_the_limit(self):
+        many = [('45', 'CALLE ALCALA', None, '28990', f'Pueblo {i}', -3.7, 40.0 + i / 1000) for i in range(600)]
+        self.builder.build('ES-MD', many + SPAIN, self.geo / 'addresses' / 'ES-MD.sqlite')
+        self.assertEqual(self.first('Calle Alcalá 45, Villaejemplo')['detail'], '28991 Villaejemplo')
+
+    def test_us_and_german_results_unchanged_with_spain_installed(self):
+        (self.geo / 'addresses' / 'ES-MD.sqlite').unlink()
+        AddressSearchTests.write_state(self, 'MI', [('18001', 'W Nine Mile Road', 'Novi', 'MI', '48375', 42.45, -83.47)])
+        GermanAddressSearchTests.write_berlin(self.geo / 'addresses' / 'DE-BE.sqlite')
+        queries = ('18001 nine mile', 'Unter den Linden 77', 'Unter den Linden 77, 10117 Berlin', 'Müllerstraße 12a')
+        before = [find_addresses(query, self.geo) for query in queries]
+        self.assertTrue(before[0] and before[1])
+        self.builder.build('ES-MD', SPAIN, self.geo / 'addresses' / 'ES-MD.sqlite')
+        self.assertEqual([find_addresses(query, self.geo) for query in queries], before)
 
 if __name__ == '__main__':
     unittest.main()
