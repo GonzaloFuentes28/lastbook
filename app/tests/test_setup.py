@@ -523,6 +523,46 @@ class Jobs(Base):
 
     def test_choosing_another_pack_after_a_failure_installs_only_its_files(self):
         """#73: the first pack's unpacked files must not end up in the library made from the second."""
+        s, shared = self.small_failed_then_medium()
+        s.start('medium', False)                       # "Choose again", the same place
+        self.assert_only_medium(s, shared)
+
+    def test_a_folder_that_cannot_be_cleared_stops_until_it_can(self):
+        """#86 review: if the old pack's files cannot be removed, setup stops with a retry message, and the retry installs
+        only the new pack's files."""
+        s, shared = self.small_failed_then_medium()
+        real = shutil.rmtree
+
+        def rmtree(path, ignore_errors=False, **k):       # like Windows with a file still open: the rest goes, that file stays
+            if Path(path).name == 'unpack':
+                for f in sorted(Path(path).rglob('*'), reverse=True):
+                    if f.name != 'shared.bin':
+                        f.rmdir() if f.is_dir() and not any(f.iterdir()) else f.unlink() if f.is_file() else None
+                if not ignore_errors:
+                    raise PermissionError('in use')
+                return
+            return real(path, ignore_errors=ignore_errors, **k)
+        with mock.patch.object(api.shutil, 'rmtree', rmtree):
+            s.start('medium', False)
+            j = self.wait(s)
+        self.assertEqual(j['state'], 'failed', j)
+        self.assertIn('could not clear the files of the previous download', j['items'][0]['error']['message'])
+        note = self.parent / 'LastbookData.setup' / 'unpack' / 'unpacked-from.json'
+        self.assertFalse(note.exists() and json.loads(note.read_text())['pack'] == 'medium')
+        s.start('medium', False)                       # "Try again", once the file is free
+        self.assert_only_medium(s, shared)
+
+    def assert_only_medium(self, s, shared):
+        j = self.wait(s)
+        self.assertEqual(j['state'], 'done', j)
+        s.finish()
+        lib, _ = api.startup(self.settings)
+        self.assertEqual((lib / 'pack.json').read_bytes(), b'{"name": "medium"}')
+        self.assertEqual((lib / shared).read_bytes(), b'b' * MiB)
+        self.assertFalse((lib / 'library-data' / 'only-small.bin').exists())
+
+    def small_failed_then_medium(self):
+        """A failed Small install has left its unpacked files; Medium is offered too."""
         shared = 'library-data/shared.bin'
         first = self.tmp / 'Lastbook-Small.zip'
         self.installed = make_pack(first, {'library-data/catalog.json': b'{"records": []}', 'pack.json': b'{"name": "small"}',
@@ -545,15 +585,7 @@ class Jobs(Base):
         j = self.wait(s)
         self.assertEqual(j['state'], 'failed', j)
         self.assertEqual([i['state'] for i in j['items']], ['done', 'failed'])
-
-        s.start('medium', False)                       # "Choose again", the same place
-        j = self.wait(s)
-        self.assertEqual(j['state'], 'done', j)
-        s.finish()
-        lib, _ = api.startup(self.settings)
-        self.assertEqual((lib / 'pack.json').read_bytes(), b'{"name": "medium"}')
-        self.assertEqual((lib / shared).read_bytes(), b'b' * MiB)
-        self.assertFalse((lib / 'library-data' / 'only-small.bin').exists())
+        return s, shared
 
     def test_trying_the_same_pack_again_keeps_its_unpacked_files(self):
         """#73: the reverse case: the same pack and revision still reuse what the failed run unpacked."""

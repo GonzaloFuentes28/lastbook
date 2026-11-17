@@ -1118,14 +1118,20 @@ def _margin(total):
 def _fresh_unpack(staged, stamp):
     """The unpack folder keeps whole files from an earlier run, so a resumed job does not unpack them again. That is only right
     for the same pack: files left by another pack (or another revision) would be taken as whole when their size matches. So the
-    folder carries a note of what it was unpacked from, and is emptied when that is not what comes next."""
+    folder carries a note of what it was unpacked from, and is emptied when that is not what comes next. The new note is written
+    only once the folder is empty: a file that cannot be removed (still open on Windows) stops setup instead of being reused."""
     note = Path(staged) / 'unpacked-from.json'
     try:
         same = json.loads(note.read_text(encoding='utf-8')) == stamp
     except (OSError, ValueError):
         same = False
-    if not same:
-        shutil.rmtree(staged, ignore_errors=True)
+    if not same and Path(staged).exists():
+        try:
+            note.unlink(missing_ok=True)
+            shutil.rmtree(staged)
+        except OSError as e:
+            raise install.Refused('unpack', f'Lastbook could not clear the files of the previous download ({type(e).__name__}). '
+                                            'Close anything that may be using them, then try again.')
     Path(staged).mkdir(parents=True, exist_ok=True)
     install._write_json(note, stamp)
 
